@@ -15,22 +15,25 @@ from stardist import random_label_cmap,ray_angles
 import metric
 import torch
 from unet import UNetStar as UNet
+import os
+from skimage import io
+from pathlib import Path
 
-DATASET_PATH_IMAGE = '<Specify path to DSB2018 dataset directory>/test/images/*.tif'
-DATASET_PATH_LABEL = '<Specify path to DSB2018 dataset directory>/test/masks/*.tif'
-MODEL_WEIGHTS_PATH= '<specify path to the pretrained model>'
+# DATASET_PATH_IMAGE = 'datasets/dsb2018_kaggle_split/test/images/*.png'
+# DATASET_PATH_LABEL = 'datasets/dsb2018_kaggle_split/test/masks/*.png'
+MODEL_WEIGHTS_PATH= 'CHECKPOINT/checkpoint_UNet2D_StarDist_DSB2018/CHECKPOINT.t7'
 
 
-X = sorted(glob(DATASET_PATH_IMAGE))
-X = list(map(imread,X))
-Y = sorted(glob(DATASET_PATH_LABEL))
-Y = list(map(imread,Y))
+# X = sorted(glob(DATASET_PATH_IMAGE))
+# X = list(map(imread,X))
+# Y = sorted(glob(DATASET_PATH_LABEL))
+# Y = list(map(imread,Y))
 
-n_channel = 1 if X[0].ndim == 2 else X[0].shape[-1]
-axis_norm = (0,1)   # normalize channels independently
+# n_channel = 1 if X[0].ndim == 2 else X[0].shape[-1]
+# axis_norm = (0,1)   # normalize channels independently
 # axis_norm = (0,1,2) # normalize channels jointly
-if n_channel > 1:
-    print("Normalizing image channels %s." % ('jointly' if axis_norm is None or 2 in axis_norm else 'independently'))
+# if n_channel > 1:
+#     print("Normalizing image channels %s." % ('jointly' if axis_norm is None or 2 in axis_norm else 'independently'))
 N_RAYS = 32
 angles = ray_angles(N_RAYS)
 
@@ -46,8 +49,8 @@ def plot(target_label,pred_label):
     plt.title('Predicted Label.')
     plt.show()
         
-def predictions(model_dist,i):
-    img = normalize(X[i],1,99.8,axis=axis_norm)
+def predictions(model_dist, X):
+    img = normalize(X,1,99.8,axis=(0, 1))
     input = torch.tensor(img)
     input = input.unsqueeze(0).unsqueeze(0)#unsqueeze 2 times
     dist,prob = model_dist(input)
@@ -61,10 +64,21 @@ print('Distance weights loaded')
 
 apscore_nms = []
 prob_thres = 0.4
-for idx,img_target in enumerate(zip(X,Y)):
+
+images_dir = 'datasets/dsb2018_kaggle_split/test/images'
+
+for idx,img_path in enumerate(Path(images_dir).glob('*.png')):
     print(idx)
-    image,target = img_target
-    dists,probs=predictions(model_dist,idx)
+    
+    img_path = str(img_path)
+    mask_path = img_path.replace('images', 'masks')
+
+    image = io.imread(img_path)
+    target = io.imread(mask_path)
+    target = np.where(target > 0, 1, 0)
+    print(image.shape, target.shape)
+
+    dists,probs=predictions(model_dist,image)
     dists = np.transpose(dists,(1,2,0))
     coord = dist_to_coord(dists)
     points = non_maximum_suppression(coord,probs,prob_thresh=prob_thres)
