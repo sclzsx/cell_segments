@@ -10,6 +10,10 @@ from stardist import fill_label_holes, random_label_cmap, calculate_extents, gpu
 from stardist.matching import matching, matching_dataset
 from stardist.models import Config2D, StarDist2D, StarDistData2D
 import json
+import sys
+import time
+import cv2
+import os
 
 
 def plot_img_label(save_plt_path, img, lbl, img_title="image", lbl_title="label", **kwargs):
@@ -56,20 +60,26 @@ def augmenter(x, y):
     return x, y
 
 
-def load_dataset(mask_dir):
-    X, Y = [], []
+def load_dataset(mask_dir, img_size):
+    X, Y, X_color = [], [], []
     for mask_path in Path(mask_dir).glob('*_mask.png'):
         mask_path = str(mask_path)
+
         image_path = mask_path.replace('_mask', '')
-        image = Image.open(image_path)
-        image = image.convert('L')
-        image = image.resize((256, 256))
+        image_color = Image.open(image_path)
+        image_color = image_color.resize((img_size, img_size))
+        image = image_color.convert('L')
         image = np.array(image)
-        mask = Image.open(mask_path)
-        mask = mask.resize((256, 256), Image.NEAREST)
-        mask = np.array(mask)
         X.append(image)
+
+        mask = Image.open(mask_path)
+        mask = mask.resize((img_size, img_size), Image.NEAREST)
+        mask = np.array(mask)
         Y.append(mask)
+
+        image_color = np.array(image_color)
+        X_color.append(image_color)
+
     check = False
     if check:
         x1, y1 = X[0], Y[0]
@@ -84,7 +94,7 @@ def load_dataset(mask_dir):
         print(K)
         plt.imshow(y1)
         plt.show()
-    return X, Y
+    return X, Y, X_color
 
 
 def preprocess_dataset(X, Y):
@@ -109,8 +119,8 @@ def split_dataset_train_val(X, Y):
     return X_trn, Y_trn, X_val, Y_val
 
 
-def train_val(mask_dir, save_name, save_root, with_dist_loss=True):
-    X, Y = load_dataset(mask_dir)
+def train_val(mask_dir, save_name, save_root):
+    X, Y, _ = load_dataset(mask_dir, img_size=256)
     X, Y = preprocess_dataset(X, Y)
     X_trn, Y_trn, X_val, Y_val = split_dataset_train_val(X, Y)
 
@@ -126,21 +136,13 @@ def train_val(mask_dir, save_name, save_root, with_dist_loss=True):
     # Predict on subsampled grid for increased efficiency and larger field of view
     grid = (2, 2)
 
-    if with_dist_loss:
-        conf = Config2D(
-            n_rays=n_rays,
-            grid=grid,
-            use_gpu=use_gpu,
-            n_channel_in=n_channel,
-        )
-    else:
-        conf = Config2D(
-            n_rays=n_rays,
-            grid=grid,
-            use_gpu=use_gpu,
-            n_channel_in=n_channel,
-            train_loss_weights=(1, 0),
-        )
+    conf = Config2D(
+        n_rays=n_rays,
+        grid=grid,
+        use_gpu=use_gpu,
+        n_channel_in=n_channel,
+        train_loss_weights=(1, 0),
+    )
     print(conf)
     vars(conf)
 
@@ -195,11 +197,16 @@ def train_val(mask_dir, save_name, save_root, with_dist_loss=True):
     plt.savefig(save_plt_dir + '/val_metrics.png')
 
 
-def do_test(mask_dir, save_name, save_root='./models', with_dist_loss=True):
-    X_val, Y_val = load_dataset(mask_dir)
-    X_val, Y_val = preprocess_dataset(X_val, Y_val)
+def mkdir(d):
+    if not os.path.exists(d):
+        os.makedirs(d)
 
-    n_channel = 1 if X_val[0].ndim == 2 else Y_val[0].shape[-1]
+
+def do_test(mask_dir, save_name, save_root='./models', img_size=256):
+    X, Y, X_color = load_dataset(mask_dir, img_size=img_size)
+    X, Y = preprocess_dataset(X, Y)
+
+    n_channel = 1 if X[0].ndim == 2 else Y[0].shape[-1]
 
     # 32 is a good default choice (see 1_data.ipynb)
     n_rays = 32
@@ -207,73 +214,82 @@ def do_test(mask_dir, save_name, save_root='./models', with_dist_loss=True):
     # Predict on subsampled grid for increased efficiency and larger field of view
     grid = (2, 2)
 
-    if with_dist_loss:
-        conf = Config2D(
-            n_rays=n_rays,
-            grid=grid,
-            use_gpu=False,
-            n_channel_in=n_channel,
-        )
-    else:
-        conf = Config2D(
-            n_rays=n_rays,
-            grid=grid,
-            use_gpu=False,
-            n_channel_in=n_channel,
-            train_loss_weights=(1, 0),
-        )
+    conf = Config2D(
+        n_rays=n_rays,
+        grid=grid,
+        use_gpu=False,
+        n_channel_in=n_channel,
+        train_loss_weights=(1, 0),
+    )
     print(conf)
     vars(conf)
 
     model = StarDist2D(conf, name=save_name, basedir=save_root)
     model.load_weights()
 
-    save_plt_dir = save_root + '/' + save_name
+    save_dir = save_root + '/' + save_name
+    mkdir(save_dir)
 
-    Y_val_pred = [model.predict_instances(x, n_tiles=model._guess_n_tiles(x), show_tile_progress=False)[0]
-                  for x in tqdm(X_val)]
-    metrics_05 = matching_dataset(Y_val, Y_val_pred, thresh=0.5, show_progress=False)
-    print(metrics_05)
-    metric_names = ['criterion', 'thresh', 'fp', 'tp', 'fn', 'precision', 'recall', 'accuracy', 'f1', 'n_true',
-                    'n_pred', 'mean_true_score', 'mean_matched_score', 'panoptic_quality', 'by_image']
-    metrics_05_dict = {}
-    for i, info in enumerate(metrics_05):
-        metrics_05_dict.setdefault(metric_names[i], info)
-    with open(save_plt_dir + '/test_metrics_iou05.json', 'w') as f:
-        json.dump(metrics_05_dict, f, indent=2)
+    time0 = time.time()
+    Y_pred = [model.predict_instances(x, n_tiles=model._guess_n_tiles(x), show_tile_progress=False)[0]
+              for x in tqdm(X)]
+    time1 = time.time()
+    fps = 1 / ((time1 - time0) / len(X))
 
-    test_metric_curves = True
-    if test_metric_curves:
-        Y_val_pred = [model.predict_instances(x, n_tiles=model._guess_n_tiles(x), show_tile_progress=False)[0]
-                      for x in tqdm(X_val)]
+    for i in range(len(Y)):
+        image_color = X_color[i]
+        image_color = cv2.cvtColor(image_color, cv2.COLOR_RGB2BGR)
 
-        plot_img_label(save_plt_dir + '/test_gt.png', X_val[0], Y_val[0], lbl_title="label GT")
-        plot_img_label(save_plt_dir + '/test_pred.png', X_val[0], Y_val_pred[0], lbl_title="label Pred")
+        pred_mask = Y_pred[i].astype('bool')
+        pred_mask = np.expand_dims(pred_mask, axis=-1)
+        pred_color = image_color * pred_mask
+        save_img_dir = save_dir + '/predsColor' + str(img_size)
+        mkdir(save_img_dir)
+        cv2.imwrite(save_img_dir + '/' + str(i) + '.png', pred_color)
 
+        output = Y_pred[i].astype('uint8')
+        binary, contours, hir = cv2.findContours(output, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+        thickness = 1
+        if img_size > 256:
+            thickness = 2
+        ret = cv2.drawContours(image_color, contours, -1, (0, 255, 0), thickness)
+        save_img_dir = save_dir + '/visContours' + str(img_size)
+        mkdir(save_img_dir)
+        cv2.imwrite(save_img_dir + '/' + str(i) + '.png', image_color)
+
+    cal_metrics = False
+    if cal_metrics:
+        metric_names = ['criterion', 'thresh', 'fp', 'tp', 'fn', 'precision', 'recall', 'accuracy', 'f1', 'n_true',
+                        'n_pred', 'mean_true_score', 'mean_matched_score', 'panoptic_quality', 'by_image']
+
+        stats = []
         taus = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-        stats = [matching_dataset(Y_val, Y_val_pred, thresh=t, show_progress=False) for t in tqdm(taus)]
+        for t in taus:
+            m = matching_dataset(Y, Y_pred, thresh=t, show_progress=False)
+            print(m)
+            stats.append(m)
+
+            metrics_dict = {}
+            for i, info in enumerate(m):
+                metrics_dict.setdefault(metric_names[i], info)
+            metrics_dict.setdefault('fps', fps)
+            with open(save_dir + '/test_metrics_iou_' + str(t) + '.json', 'w') as f:
+                json.dump(metrics_dict, f, indent=2)
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-
         for m in ('precision', 'recall', 'accuracy', 'f1', 'mean_true_score', 'mean_matched_score', 'panoptic_quality'):
             ax1.plot(taus, [s._asdict()[m] for s in stats], '.-', lw=2, label=m)
         ax1.set_xlabel(r'IoU threshold $\tau$')
         ax1.set_ylabel('Metric value')
         ax1.grid()
         ax1.legend()
-
         for m in ('fp', 'tp', 'fn'):
             ax2.plot(taus, [s._asdict()[m] for s in stats], '.-', lw=2, label=m)
         ax2.set_xlabel(r'IoU threshold $\tau$')
         ax2.set_ylabel('Number #')
         ax2.grid()
         ax2.legend()
-
-        plt.savefig(save_plt_dir + '/test_metrics.png')
-
-    sample_step = int(0.25 * len(X_val))
-    for i in range(0, len(X_val), sample_step):
-        save_test_plt(save_plt_dir + '/test_sample_' + str(i) + '.png', model, X_val[i])
+        plt.savefig(save_dir + '/test_metrics.png')
 
 
 def save_test_plt(save_plt_path, model, x, show_dist=True):
@@ -300,26 +316,20 @@ def save_test_plt(save_plt_path, model, x, show_dist=True):
 if __name__ == '__main__':
     np.random.seed(42)
 
-    # save_name = 'model1_stardist'
-    # mask_dir_train = '../datasets/model1_training/all_straight'
-    # mask_dir_test = '../datasets/model1_test'
+    save_name = 'model1_stardist'
+    mask_dir_train = '../datasets/model1_training/all_straight'
+    mask_dir_test = '../datasets/model1_test'
     # train_val(mask_dir_train, save_name, save_root='./models')
-    # do_test(mask_dir_test, save_name, save_root='./models')
+    do_test(mask_dir_test, save_name, save_root='./models')
 
-    # save_name = 'model2_stardist'
-    # mask_dir_train = '../datasets/model2_training'
-    # mask_dir_test = '../datasets/model2_test'
+    save_name = 'model2_stardist'
+    mask_dir_train = '../datasets/model2_training'
+    mask_dir_test = '../datasets/model2_test'
     # train_val(mask_dir_train, save_name, save_root='./models')
-    # do_test(mask_dir_test, save_name, save_root='./models')
+    do_test(mask_dir_test, save_name, save_root='./models')
 
-    # save_name = 'model3_stardist'
-    # mask_dir_train = '../datasets/model3_training'
-    # mask_dir_test = '../datasets/model3_test'
+    save_name = 'model3_stardist'
+    mask_dir_train = '../datasets/model3_training'
+    mask_dir_test = '../datasets/model3_test'
     # train_val(mask_dir_train, save_name, save_root='./models')
-    # do_test(mask_dir_test, save_name, save_root='./models')
-
-    # save_name = 'model2_unet'
-    # mask_dir_train = '../datasets/model2_training'
-    # mask_dir_test = '../datasets/model2_test'
-    # train_val(mask_dir_train, save_name, save_root='./models', with_dist_loss=False)
-    # do_test(mask_dir_test, save_name, save_root='./models', with_dist_loss=False)
+    do_test(mask_dir_test, save_name, save_root='./models')

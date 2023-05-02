@@ -140,14 +140,23 @@ def split_train_test(data_dir, test_rate, dst_size):
 
 
 if __name__ == '__main__':
-    data_dirs = [
-        '../datasets/model1_training',
-        '../datasets/model2_training',
-        '../datasets/model3_training',
+    # data_dirs = [
+    #     '../datasets/model1_training',
+    #     '../datasets/model2_training',
+    #     '../datasets/model3_training',
+    #
+    #     '../datasets/model1_test',
+    #     '../datasets/model2_test',
+    #     '../datasets/model3_test',
+    # ]
 
-        '../datasets/model1_test',
-        '../datasets/model2_test',
-        '../datasets/model3_test',
+    data_dirs = [
+        '../extend/testsets/model_1_all_test_duck_20',
+        '../extend/testsets/model_2_all_test_duck_50',
+        '../extend/testsets/model_2_all_test-pig_20',
+        '../extend/testsets/model_3_all_test_cattle_35',
+        '../extend/testsets/model_3_all_test_mice_100',
+        '../extend/testsets/model_3_all_test_pig_50',
     ]
 
     for data_dir in data_dirs:
